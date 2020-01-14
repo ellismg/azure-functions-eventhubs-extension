@@ -4,8 +4,9 @@
 using System;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Processor;
+using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Azure.WebJobs.Description;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Config;
@@ -39,9 +40,9 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             _configuration = configuration;
         }
 
-        internal Action<ExceptionReceivedEventArgs> ExceptionHandler { get; set; }
+        internal Action<Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs> ExceptionHandler { get; set; }
 
-        private void ExceptionReceivedHandler(ExceptionReceivedEventArgs args)
+        private void ExceptionReceivedHandler(Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs args)
         {
             ExceptionHandler?.Invoke(args);
         }
@@ -75,7 +76,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             context.AddBindingRule<EventHubAttribute>()
                 .BindToInput(attribute =>
             {
-                return _options.Value.GetEventHubClient(attribute.EventHubName, attribute.Connection);
+                return _options.Value.GetEventHubProducerClient(attribute.EventHubName, attribute.Connection);
             });
 
             ExceptionHandler = (e =>
@@ -84,7 +85,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             });
         }
 
-        internal static void LogExceptionReceivedEvent(ExceptionReceivedEventArgs e, ILoggerFactory loggerFactory)
+        internal static void LogExceptionReceivedEvent(Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs e, ILoggerFactory loggerFactory)
         {
             try
             {
@@ -102,8 +103,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         private static LogLevel GetLogLevel(Exception ex)
         {
-            if (ex is ReceiverDisconnectedException ||
-                ex is LeaseLostException)
+            if (ex is Microsoft.Azure.EventHubs.ReceiverDisconnectedException ||
+                ex is Microsoft.Azure.EventHubs.Processor.LeaseLostException)
             {
                 // For EventProcessorHost these exceptions can happen as part
                 // of normal partition balancing across instances, so we want to
@@ -111,7 +112,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 return LogLevel.Information;
             }
 
-            var ehex = ex as EventHubsException;
+            var ehex = ex as Microsoft.Azure.EventHubs.EventHubsException;
+
             if (!(ex is OperationCanceledException) && (ehex == null || !ehex.IsTransient))
             {
                 // any non-transient exceptions or unknown exception types
@@ -128,7 +130,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         private IAsyncCollector<EventData> BuildFromAttribute(EventHubAttribute attribute)
         {
-            EventHubClient client = _options.Value.GetEventHubClient(attribute.EventHubName, attribute.Connection);
+            EventHubProducerClient client = _options.Value.GetEventHubProducerClient(attribute.EventHubName, attribute.Connection);
             return new EventHubAsyncCollector(client);
         }
 
@@ -139,7 +141,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             => new EventData(input);
 
         private static byte[] ConvertEventData2Bytes(EventData input)
-            => input.Body.Array;
+            => input.Body.ToArray();
 
         private static EventData ConvertString2EventData(string input)
             => ConvertBytes2EventData(Encoding.UTF8.GetBytes(input));

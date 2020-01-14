@@ -6,7 +6,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
 
 namespace Microsoft.Azure.WebJobs.EventHubs
 {
@@ -17,7 +18,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs
     /// </summary>
     internal class EventHubAsyncCollector : IAsyncCollector<EventData>
     {
-        private readonly EventHubClient _client;
+        // TODO(matell): This is IAsyncDisposable. Do we need to push that disposability up?
+        private readonly EventHubProducerClient _client;
 
         private readonly Dictionary<string, PartitionCollector> _partitions = new Dictionary<string, PartitionCollector>();
               
@@ -30,7 +32,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// Create a sender around the given client. 
         /// </summary>
         /// <param name="client"></param>
-        public EventHubAsyncCollector(EventHubClient client)
+        public EventHubAsyncCollector(EventHubProducerClient client)
         {
             if (client == null)
             {
@@ -52,7 +54,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 throw new ArgumentNullException("item");
             }
 
-            string key = item.SystemProperties?.PartitionKey ?? string.Empty;
+            // TODO(matell): I believe this proeprty will always be "null" on an EventData, since in the new SDK you
+            // are unable to set this property when constructing an EventData object.  Instead, the Batch contains
+            // the PartitionKey to use. See https://github.com/Azure/azure-functions-eventhubs-extension/issues/16
+            // for a related issue.
+            string key = item.PartitionKey ?? string.Empty;
 
             PartitionCollector partition;
             lock (_partitions)
@@ -67,7 +73,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         }
 
         /// <summary>
-        /// synchronously flush events that have been queued up via AddAsync.
+        /// Asynchronously flush events that have been queued up via AddAsync.
         /// </summary>
         /// <param name="cancellationToken">a cancellation token</param>
         public async Task FlushAsync(CancellationToken cancellationToken = default(CancellationToken))
@@ -96,7 +102,21 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// <param name="batch">the set of events to send</param>
         protected virtual async Task SendBatchAsync(IEnumerable<EventData> batch)
         {
-            await _client.SendAsync(batch);
+            using (EventDataBatch b = await _client.CreateBatchAsync())
+            {
+                foreach (EventData d in batch)
+                {
+                    // TODO(matell):  This feels fraglie, but relates to how we conmpute the size
+                    // of the batch later.  I think in practice we can get this to not fail by correctly
+                    // setting limits in PartitionCollector::AddAsync
+                    if (!b.TryAdd(d))
+                    {
+                        throw new Exception("Failed to add data to batch.");
+                    }
+                }
+
+                await _client.SendAsync(b);
+            }
         }
 
         // A per-partition sender 
@@ -131,8 +151,10 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 {
                     lock (_list)
                     {
-                        var size = (int)item.Body.Count;
+                        var size = item.Body.Length;
 
+                        // TODO(matell): Is it correct to have this logic here?  Should we insted be determining the size of a batch from the service
+                        // instead of a fixed value?
                         if (size > MaxByteSize)
                         {
                             // Single event is too large to add.
@@ -156,7 +178,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             }
 
             /// <summary>
-            /// synchronously flush events that have been queued up via AddAsync.
+            /// Asynchronously flush events that have been queued up via AddAsync.
             /// </summary>
             /// <param name="cancellationToken">a cancellation token</param>
             public async Task FlushAsync(CancellationToken cancellationToken = default(CancellationToken))
@@ -172,12 +194,6 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 if (batch.Length > 0)
                 {
                     await _parent.SendBatchAsync(batch);
-
-                    // Dispose all messages to help with memory pressure. If this is missed, the finalizer thread will still get them. 
-                    foreach (var msg in batch)
-                    {
-                        msg.Dispose();
-                    }
                 }
             }
         }

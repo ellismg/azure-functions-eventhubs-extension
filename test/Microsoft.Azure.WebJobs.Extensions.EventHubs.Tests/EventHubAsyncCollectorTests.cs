@@ -4,14 +4,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.WebJobs.Host.TestCommon;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
 using Xunit;
-
-using static Microsoft.Azure.EventHubs.EventData;
 
 namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 {
@@ -25,11 +24,17 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
         public EventData CreateEvent(byte[] body, string partitionKey)
         {
-            var data = new EventData(body);
-            IDictionary<string, object> sysProps = TestHelpers.New<SystemPropertiesCollection>();
-            sysProps["x-opt-partition-key"] = partitionKey;
-            TestHelpers.SetField(data, "SystemProperties", sysProps);
-            return data;
+            // TODO(matell): I thought that we were adding APIs that made it easier for you to mock and EventData
+            // like this. Note this code here is pretty dubious right now because on the sending side it's not
+            // possible to make an EventData with this this property set (you set the partition key on the batch
+            // and the service assigns it to EventData's that we read).  So the tests that use this validate a
+            // case that can't normally happen.
+            ConstructorInfo c = typeof(EventData).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null, new Type[] { 
+                typeof(ReadOnlyMemory<byte>), typeof(IDictionary<string, object>), typeof(IReadOnlyDictionary<string, object>), typeof(long), typeof(long), typeof(DateTimeOffset), typeof(string)
+            }, null);
+
+            EventData d = (EventData) c.Invoke(new object[] { new ReadOnlyMemory<byte>(body), null, null, long.MinValue, long.MinValue, default(DateTimeOffset), partitionKey });
+            return d;
         }
 
         [Fact]
@@ -37,7 +42,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
         {
             var collector = new TestEventHubAsyncCollector();
 
-            await collector.AddAsync(this.CreateEvent(new byte[] { 1 }, "pk1"));
+            await collector.AddAsync(CreateEvent(new byte[] { 1 }, "pk1"));
             await collector.AddAsync(CreateEvent(new byte[] { 2 }, "pk2"));
 
             // Not physically sent yet since we haven't flushed
@@ -223,7 +228,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
         internal class TestEventHubAsyncCollector : EventHubAsyncCollector
         {
-            private static EventHubClient testClient = EventHubClient.CreateFromConnectionString(FakeConnectionString1);
+            private static EventHubProducerClient testClient = new EventHubProducerClient(FakeConnectionString1);
 
             // EventData is disposed after sending. So track raw bytes; not the actual EventData.
             private List<byte[]> sentEvents = new List<byte[]>();
@@ -236,7 +241,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             {
             }
 
-            public static EventHubClient TestClient { get => testClient; set => testClient = value; }
+            public static EventHubProducerClient TestClient { get => testClient; set => testClient = value; }
 
             public static string FakeConnectionString1 => FakeConnectionString;
 
@@ -245,17 +250,17 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             protected override Task SendBatchAsync(IEnumerable<EventData> batch)
             {
                 // Assert they all have the same partition key (could be null)
-                var partitionKey = batch.First().SystemProperties?.PartitionKey;
+                var partitionKey = batch.First().PartitionKey;
                 foreach (var e in batch)
                 {
-                    Assert.Equal(partitionKey, e.SystemProperties?.PartitionKey);
+                    Assert.Equal(partitionKey, e.PartitionKey);
                 }
 
                 lock (SentEvents)
                 {
                     foreach (var e in batch)
                     {
-                        var payloadBytes = e.Body.Array;
+                        var payloadBytes = e.Body.ToArray();
                         Assert.NotNull(payloadBytes);
                         SentEvents.Add(payloadBytes);
                     }

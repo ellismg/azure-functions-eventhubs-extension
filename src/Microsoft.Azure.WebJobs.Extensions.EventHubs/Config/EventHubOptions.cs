@@ -6,10 +6,12 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Azure.EventHubs;
 using Microsoft.Azure.EventHubs.Processor;
 using Microsoft.Azure.WebJobs.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -23,7 +25,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         // Connection strings may also encapsulate different endpoints. 
 
         // The client cache must be thread safe because clients are accessed/added on the function
-        private readonly ConcurrentDictionary<string, EventHubClient> _clients = new ConcurrentDictionary<string, EventHubClient>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, EventHubProducerClient> _producerClients = new ConcurrentDictionary<string, EventHubProducerClient>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ReceiverCreds> _receiverCreds = new Dictionary<string, ReceiverCreds>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, EventProcessorHost> _explicitlyProvidedHosts = new Dictionary<string, EventProcessorHost>(StringComparer.OrdinalIgnoreCase);
 
@@ -68,14 +70,14 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// Add an existing client for sending messages to an event hub.  Infer the eventHub name from client.path
         /// </summary>
         /// <param name="client"></param>
-        public void AddEventHubClient(EventHubClient client)
+        public void AddEventHubProducerClient(EventHubProducerClient client)
         {
             if (client == null)
             {
                 throw new ArgumentNullException("client");
             }
             string eventHubName = client.EventHubName;
-            AddEventHubClient(eventHubName, client);
+            AddEventHubProducerClient(eventHubName, client);
         }
 
         /// <summary>
@@ -83,7 +85,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// </summary>
         /// <param name="eventHubName">name of the event hub</param>
         /// <param name="client"></param>
-        public void AddEventHubClient(string eventHubName, EventHubClient client)
+        public void AddEventHubProducerClient(string eventHubName, EventHubProducerClient client)
         {
             if (eventHubName == null)
             {
@@ -94,7 +96,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 throw new ArgumentNullException("client");
             }
 
-            _clients[eventHubName] = client;
+            _producerClients[eventHubName] = client;
         }
 
         /// <summary>
@@ -113,14 +115,17 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 throw new ArgumentNullException("sendConnectionString");
             }
 
-            EventHubsConnectionStringBuilder sb = new EventHubsConnectionStringBuilder(sendConnectionString);
-            if (string.IsNullOrWhiteSpace(sb.EntityPath))
+            EventHubProducerClient client;
+            if (!string.IsNullOrEmpty(GetEntityPathFromConnectionString(sendConnectionString)))
             {
-                sb.EntityPath = eventHubName;
+                client = new EventHubProducerClient(sendConnectionString);
+            }
+            else
+            {
+                client = new EventHubProducerClient(sendConnectionString, eventHubName);
             }
 
-            var client = EventHubClient.CreateFromConnectionString(sb.ToString());
-            AddEventHubClient(eventHubName, client);
+            AddEventHubProducerClient(eventHubName, client);
         }
 
         /// <summary>
@@ -197,29 +202,46 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             };
         }
 
-        internal EventHubClient GetEventHubClient(string eventHubName, string connection)
+        internal EventHubProducerClient GetEventHubProducerClient(string eventHubName, string connection)
         {
-            EventHubClient client;
+            EventHubProducerClient client;
 
             if (string.IsNullOrEmpty(eventHubName))
             {
-                EventHubsConnectionStringBuilder builder = new EventHubsConnectionStringBuilder(connection);
-                eventHubName = builder.EntityPath;
+                eventHubName = GetEntityPathFromConnectionString(connection);
             }
 
-            if (_clients.TryGetValue(eventHubName, out client))
+            if (_producerClients.TryGetValue(eventHubName, out client))
             {
                 return client;
             }
             else if (!string.IsNullOrWhiteSpace(connection))
             {
-                return _clients.GetOrAdd(eventHubName, key =>
+                return _producerClients.GetOrAdd(eventHubName, key =>
                 {
                     AddSender(key, connection);
-                    return _clients[key];
+                    return _producerClients[key];
                 });
             }
             throw new InvalidOperationException("No event hub sender named " + eventHubName);
+        }
+
+        private static string GetEntityPathFromConnectionString(string connection)
+        {
+            if (string.IsNullOrWhiteSpace(connection))
+            {
+                throw new ArgumentException("Connection string should be non empty", nameof(connection));
+            }
+
+            foreach (string keyValuePair in connection.Split(new char[] { ';' }, StringSplitOptions.RemoveEmptyEntries)) {
+                string[] split = keyValuePair.Split(new char[] { '=' }, 2);
+                if (split[0].Equals("EntityPath", StringComparison.OrdinalIgnoreCase))
+                {
+                    return split[1];
+                }
+            }
+
+            return null;
         }
 
         // Lookup a listener for receiving events given the name provided in the [EventHubTrigger] attribute. 
