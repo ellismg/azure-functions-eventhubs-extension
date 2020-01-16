@@ -58,7 +58,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             _singleDispatch = singleDispatch;
             _options = options;
             _logger = logger;
-            _scaleMonitor = new Lazy<EventHubsScaleMonitor>(() => new EventHubsScaleMonitor(_functionId, _eventHubName, _consumerGroup, _connectionString, _storageConnectionString, _logger, blobContainer));
+            _scaleMonitor = new Lazy<EventHubsScaleMonitor>(() => new EventHubsScaleMonitor(_functionId, _eventHubName, _consumerGroup, _connectionString, _storageConnectionString, _logger, /* TODO(matell): should be blobContainer */ null));
         }
 
         void IListener.Cancel()
