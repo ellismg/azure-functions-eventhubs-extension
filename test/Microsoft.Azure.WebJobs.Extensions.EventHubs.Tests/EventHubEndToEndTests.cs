@@ -7,7 +7,7 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
+using Azure.Messaging.EventHubs;
 using Microsoft.Azure.WebJobs.Host.TestCommon;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -85,13 +85,13 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             }
 
             public static void ProcessSingleEvent([EventHubTrigger(TestHubName)] string evt,
-                       string partitionKey, DateTime enqueuedTimeUtc, IDictionary<string, object> properties,
-                       IDictionary<string, object> systemProperties)
+                       string partitionKey, DateTimeOffset enqueuedTime, IDictionary<string, object> properties,
+                       IReadOnlyDictionary<string, object> systemProperties)
             {
                 // filter for the ID the current test is using
                 if (evt == _testId)
                 {
-                    Assert.True((DateTime.Now - enqueuedTimeUtc).TotalSeconds < 30);
+                    Assert.True((DateTimeOffset.Now - enqueuedTime).TotalSeconds < 30);
 
                     Assert.Equal("value1", properties["TestProp1"]);
                     Assert.Equal("value2", properties["TestProp2"]);
@@ -117,11 +117,11 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             }
 
             public static void ProcessMultipleEvents([EventHubTrigger(TestHubName)] string[] events,
-                string[] partitionKeyArray, DateTime[] enqueuedTimeUtcArray, IDictionary<string, object>[] propertiesArray,
-                IDictionary<string, object>[] systemPropertiesArray)
+                string[] partitionKeyArray, DateTime[] enqueuedTimeArray, IDictionary<string, object>[] propertiesArray,
+                IReadOnlyDictionary<string, object>[] systemPropertiesArray)
             {
                 Assert.Equal(events.Length, partitionKeyArray.Length);
-                Assert.Equal(events.Length, enqueuedTimeUtcArray.Length);
+                Assert.Equal(events.Length, enqueuedTimeArray.Length);
                 Assert.Equal(events.Length, propertiesArray.Length);
                 Assert.Equal(events.Length, systemPropertiesArray.Length);
 
@@ -139,46 +139,46 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             }
         }
 
-        public class EventHubPartitionKeyTestJobs
-        {
-            public static async Task SendEvents_TestHub(
-                string input,
-                [EventHub(TestHubName)] EventHubClient client)
-            {
-                List<EventData> list = new List<EventData>();
-                EventData evt = new EventData(Encoding.UTF8.GetBytes(input));
+        //public class EventHubPartitionKeyTestJobs
+        //{
+        //    public static async Task SendEvents_TestHub(
+        //        string input,
+        //        [EventHub(TestHubName)] EventHubClient client)
+        //    {
+        //        List<EventData> list = new List<EventData>();
+        //        EventData evt = new EventData(Encoding.UTF8.GetBytes(input));
 
-                // Send event without PK
-                await client.SendAsync(evt);
+        //        // Send event without PK
+        //        await client.SendAsync(evt);
 
-                // Send event with different PKs
-                for (int i = 0; i < 5; i++)
-                {
-                    evt = new EventData(Encoding.UTF8.GetBytes(input));
-                    await client.SendAsync(evt, "test_pk" + i);
-                }
-            }
+        //        // Send event with different PKs
+        //        for (int i = 0; i < 5; i++)
+        //        {
+        //            evt = new EventData(Encoding.UTF8.GetBytes(input));
+        //            await client.SendAsync(evt, "test_pk" + i);
+        //        }
+        //    }
 
-            public static void ProcessMultiplePartitionEvents([EventHubTrigger(TestHubName)] EventData[] events)
-            {
-                foreach (EventData eventData in events)
-                {
-                    string message = Encoding.UTF8.GetString(eventData.Body);
+        //    public static void ProcessMultiplePartitionEvents([EventHubTrigger(TestHubName)] EventData[] events)
+        //    {
+        //        foreach (EventData eventData in events)
+        //        {
+        //            string message = Encoding.UTF8.GetString(eventData.Body);
 
-                    // filter for the ID the current test is using
-                    if (message == _testId)
-                    {
-                        _results.Add(eventData.SystemProperties.PartitionKey);
-                        _results.Sort();
+        //            // filter for the ID the current test is using
+        //            if (message == _testId)
+        //            {
+        //                _results.Add(eventData.SystemProperties.PartitionKey);
+        //                _results.Sort();
 
-                        if (_results.Count == 6 && _results[5] == "test_pk4")
-                        {
-                            _eventWait.Set();
-                        }
-                    }
-                }
-            }
-        }
+        //                if (_results.Count == 6 && _results[5] == "test_pk4")
+        //                {
+        //                    _eventWait.Set();
+        //                }
+        //            }
+        //        }
+        //    }
+        //}
 
         private JobHost BuildHost<T>()
         {

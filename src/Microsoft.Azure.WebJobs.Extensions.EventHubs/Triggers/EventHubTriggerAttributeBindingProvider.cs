@@ -67,7 +67,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 _options.Value.AddReceiver(resolvedEventHubName, connectionString);
             }
 
-            var eventHostListener = _options.Value.GetEventProcessorHost(_config, resolvedEventHubName, resolvedConsumerGroup);
+            var eventProcessorClient = _options.Value.GetEventProcessorClient(_config, resolvedEventHubName, resolvedConsumerGroup);
 
             string storageConnectionString = _config.GetWebJobsConnectionString(ConnectionStringNames.Storage);
 
@@ -81,7 +81,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                                                 connectionString,
                                                 storageConnectionString,
                                                 factoryContext.Executor,
-                                                eventHostListener,
+                                                eventProcessorClient,
                                                 singleDispatch,
                                                 _options.Value,
                                                 _logger);

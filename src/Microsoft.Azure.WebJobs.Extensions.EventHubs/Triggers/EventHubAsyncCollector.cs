@@ -106,7 +106,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             {
                 foreach (EventData d in batch)
                 {
-                    // TODO(matell):  This feels fraglie, but relates to how we conmpute the size
+                    // TODO(matell):  This feels fraglie, but relates to how we compute the size
                     // of the batch later.  I think in practice we can get this to not fail by correctly
                     // setting limits in PartitionCollector::AddAsync
                     if (!b.TryAdd(d))

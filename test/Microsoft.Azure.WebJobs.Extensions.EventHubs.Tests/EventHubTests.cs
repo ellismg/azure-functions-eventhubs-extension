@@ -5,9 +5,8 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
-using System.Threading;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Consumer;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Azure.WebJobs.Host.TestCommon;
 using Microsoft.Extensions.Configuration;
@@ -15,7 +14,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using Xunit;
-using static Microsoft.Azure.EventHubs.EventData;
 
 namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 {
@@ -70,10 +68,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
         [Fact]
         public void GetBindingData_SingleDispatch_ReturnsExpectedValue()
         {
-            var evt = new EventData(new byte[] { });
-            IDictionary<string, object> sysProps = GetSystemProperties();
-
-            TestHelpers.SetField(evt, "SystemProperties", sysProps);
+            var evt = GetTestEventData(new byte[] { });
 
             var input = EventHubTriggerInput.New(evt);
             input.PartitionContext = GetPartitionContext();
@@ -83,10 +78,10 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             Assert.Equal(7, bindingData.Count);
             Assert.Same(input.PartitionContext, bindingData["PartitionContext"]);
-            Assert.Equal(evt.SystemProperties.PartitionKey, bindingData["PartitionKey"]);
-            Assert.Equal(evt.SystemProperties.Offset, bindingData["Offset"]);
-            Assert.Equal(evt.SystemProperties.SequenceNumber, bindingData["SequenceNumber"]);
-            Assert.Equal(evt.SystemProperties.EnqueuedTimeUtc, bindingData["EnqueuedTimeUtc"]);
+            Assert.Equal(evt.PartitionKey, bindingData["PartitionKey"]);
+            Assert.Equal(evt.Offset, bindingData["Offset"]);
+            Assert.Equal(evt.SequenceNumber, bindingData["SequenceNumber"]);
+            Assert.Equal(evt.EnqueuedTime, bindingData["EnqueuedTimeUtc"]);
             Assert.Same(evt.Properties, bindingData["Properties"]);
             IDictionary<string, object> bindingDataSysProps = bindingData["SystemProperties"] as Dictionary<string, object>;
             Assert.NotNull(bindingDataSysProps);
@@ -98,36 +93,39 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             Assert.Equal(bindingDataSysProps["iothub-enqueuedtime"], DateTime.MinValue);
         }
 
-        private static IDictionary<string, object> GetSystemProperties(string partitionKey = "TestKey")
+        private static EventData GetTestEventData(ReadOnlyMemory<byte> eventBody, string partitionKey = "TestKey")
         {
+            var constructor = typeof(EventData).GetConstructor(
+                BindingFlags.Instance | BindingFlags.NonPublic,
+                null,
+                new Type[] { typeof(ReadOnlyMemory<byte>), typeof(IDictionary<string, object>), typeof(IReadOnlyDictionary<string, object>), typeof(long), typeof(long), typeof(DateTimeOffset), typeof(string) },
+                null);
+
             long testSequence = 4294967296;
-            IDictionary<string, object> sysProps = TestHelpers.New<SystemPropertiesCollection>();
+            long testOffset = 12345;
+            DateTimeOffset enquedTime = DateTimeOffset.MinValue;
+
+            Dictionary<string, object> sysProps = new Dictionary<string, object>();
             sysProps["x-opt-partition-key"] = partitionKey;
-            sysProps["x-opt-offset"] = "TestOffset";
-            sysProps["x-opt-enqueued-time"] = DateTime.MinValue;
+            sysProps["x-opt-offset"] = testOffset;
+            sysProps["x-opt-enqueued-time"] = enquedTime;
             sysProps["x-opt-sequence-number"] = testSequence;
             sysProps["iothub-connection-device-id"] = "testDeviceId";
-            sysProps["iothub-enqueuedtime"] = DateTime.MinValue;
-            return sysProps;
+            sysProps["iothub-enqueuedtime"] = enquedTime;
+
+            return (EventData)constructor.Invoke(new object[] { eventBody, new Dictionary<string, object>(), sysProps, testSequence, testOffset, enquedTime, partitionKey });
         }
 
         [Fact]
         public void GetBindingData_MultipleDispatch_ReturnsExpectedValue()
         {
-
+            var count = 0;
             var events = new EventData[3]
             {
-                new EventData(Encoding.UTF8.GetBytes("Event 1")),
-                new EventData(Encoding.UTF8.GetBytes("Event 2")),
-                new EventData(Encoding.UTF8.GetBytes("Event 3")),
+                GetTestEventData(Encoding.UTF8.GetBytes("Event 1"), $"pk{count++}"),
+                GetTestEventData(Encoding.UTF8.GetBytes("Event 2"), $"pk{count++}"),
+                GetTestEventData(Encoding.UTF8.GetBytes("Event 3"), $"pk{count++}"),
             };
-
-            var count = 0;
-            foreach (var evt in events)
-            {
-                IDictionary<string, object> sysProps = GetSystemProperties($"pk{count++}");
-                TestHelpers.SetField(evt, "SystemProperties", sysProps);
-            }
 
             var input = new EventHubTriggerInput
             {
@@ -142,15 +140,15 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             // verify an array was created for each binding data type
             Assert.Equal(events.Length, ((string[])bindingData["PartitionKeyArray"]).Length);
-            Assert.Equal(events.Length, ((string[])bindingData["OffsetArray"]).Length);
+            Assert.Equal(events.Length, ((long[])bindingData["OffsetArray"]).Length);
             Assert.Equal(events.Length, ((long[])bindingData["SequenceNumberArray"]).Length);
-            Assert.Equal(events.Length, ((DateTime[])bindingData["EnqueuedTimeUtcArray"]).Length);
+            Assert.Equal(events.Length, ((DateTimeOffset[])bindingData["EnqueuedTimeArray"]).Length);
             Assert.Equal(events.Length, ((IDictionary<string, object>[])bindingData["PropertiesArray"]).Length);
-            Assert.Equal(events.Length, ((IDictionary<string, object>[])bindingData["SystemPropertiesArray"]).Length);
+            Assert.Equal(events.Length, ((IReadOnlyDictionary<string, object>[])bindingData["SystemPropertiesArray"]).Length);
 
-            Assert.Equal(events[0].SystemProperties.PartitionKey, ((string[])bindingData["PartitionKeyArray"])[0]);
-            Assert.Equal(events[1].SystemProperties.PartitionKey, ((string[])bindingData["PartitionKeyArray"])[1]);
-            Assert.Equal(events[2].SystemProperties.PartitionKey, ((string[])bindingData["PartitionKeyArray"])[2]);
+            Assert.Equal(events[0].PartitionKey, ((string[])bindingData["PartitionKeyArray"])[0]);
+            Assert.Equal(events[1].PartitionKey, ((string[])bindingData["PartitionKeyArray"])[1]);
+            Assert.Equal(events[2].PartitionKey, ((string[])bindingData["PartitionKeyArray"])[2]);
         }
 
         [Fact]
@@ -164,7 +162,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             var contract = strategy.GetBindingData(triggerInput);
 
             EventData single = strategy.BindSingle(triggerInput, null);
-            string body = Encoding.UTF8.GetString(single.Body.Array);
+            string body = Encoding.UTF8.GetString(single.Body.Span);
 
             Assert.Equal(data, body);
             Assert.Null(contract["PartitionContext"]);
@@ -242,10 +240,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
                     c.AddInMemoryCollection(new Dictionary<string, string>
                     {
                         { "AzureWebJobs:extensions:EventHubs:EventProcessorOptions:MaxBatchSize", "100" },
-                        { "AzureWebJobs:extensions:EventHubs:EventProcessorOptions:PrefetchCount", "200" },
                         { "AzureWebJobs:extensions:EventHubs:BatchCheckpointFrequency", "5" },
-                        { "AzureWebJobs:extensions:EventHubs:PartitionManagerOptions:LeaseDuration", "00:00:31" },
-                        { "AzureWebJobs:extensions:EventHubs:PartitionManagerOptions:RenewInterval", "00:00:21" }
                     });
                 })
                 .Build();
@@ -254,33 +249,18 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             var extensionRegistry = host.Services.GetService<IExtensionRegistry>();
             var options = host.Services.GetService<IOptions<EventHubOptions>>().Value;
 
-            var eventProcessorOptions = options.EventProcessorOptions;
-            Assert.Equal(100, eventProcessorOptions.MaxBatchSize);
-            Assert.Equal(200, eventProcessorOptions.PrefetchCount);
             Assert.Equal(5, options.BatchCheckpointFrequency);
-            Assert.Equal(31, options.PartitionManagerOptions.LeaseDuration.TotalSeconds);
-            Assert.Equal(21, options.PartitionManagerOptions.RenewInterval.TotalSeconds);
         }
 
-        internal static PartitionContext GetPartitionContext(string partitionId = null, string eventHubPath = null,
-            string consumerGroupName = null, string owner = null)
+        internal static PartitionContext GetPartitionContext(string partitionId = null)
         {
             var constructor = typeof(PartitionContext).GetConstructor(
                 BindingFlags.NonPublic | BindingFlags.Instance,
                 null,
-                new Type[] { typeof(EventProcessorHost), typeof(string), typeof(string), typeof(string), typeof(CancellationToken) },
+                new Type[] { typeof(string) },
                 null);
-            var context = (PartitionContext)constructor.Invoke(new object[] { null, partitionId, eventHubPath, consumerGroupName, null });
 
-            // Set a lease, which allows us to grab the "Owner"
-            constructor = typeof(Lease).GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null, new Type[] { }, null);
-            var lease = (Lease)constructor.Invoke(new object[] { });
-            lease.Owner = owner;
-
-            var leaseProperty = typeof(PartitionContext).GetProperty("Lease", BindingFlags.Public | BindingFlags.Instance);
-            leaseProperty.SetValue(context, lease);
-
-            return context;
+            return (PartitionContext)constructor.Invoke(new object[] { partitionId });
         }
     }
 }

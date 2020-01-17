@@ -40,21 +40,13 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             _configuration = configuration;
         }
 
-        internal Action<Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs> ExceptionHandler { get; set; }
-
-        private void ExceptionReceivedHandler(Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs args)
-        {
-            ExceptionHandler?.Invoke(args);
-        }
-
         public void Initialize(ExtensionConfigContext context)
         {
             if (context == null)
             {
                 throw new ArgumentNullException(nameof(context));
             }
-
-            _options.Value.EventProcessorOptions.SetExceptionHandler(ExceptionReceivedHandler);
+            
             _configuration.ConfigurationSection.Bind(_options);
 
             context
@@ -78,54 +70,6 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             {
                 return _options.Value.GetEventHubProducerClient(attribute.EventHubName, attribute.Connection);
             });
-
-            ExceptionHandler = (e =>
-            {
-                LogExceptionReceivedEvent(e, _loggerFactory);
-            });
-        }
-
-        internal static void LogExceptionReceivedEvent(Microsoft.Azure.EventHubs.Processor.ExceptionReceivedEventArgs e, ILoggerFactory loggerFactory)
-        {
-            try
-            {
-                var logger = loggerFactory?.CreateLogger(LogCategories.Executor);
-                string message = $"EventProcessorHost error (Action={e.Action}, HostName={e.Hostname}, PartitionId={e.PartitionId})";
-
-                var logLevel = GetLogLevel(e.Exception);
-                logger?.Log(logLevel, 0, message, e.Exception, (s, ex) => message);
-            }
-            catch
-            {
-                // best effort logging
-            }
-        }
-
-        private static LogLevel GetLogLevel(Exception ex)
-        {
-            if (ex is Microsoft.Azure.EventHubs.ReceiverDisconnectedException ||
-                ex is Microsoft.Azure.EventHubs.Processor.LeaseLostException)
-            {
-                // For EventProcessorHost these exceptions can happen as part
-                // of normal partition balancing across instances, so we want to
-                // trace them, but not treat them as errors.
-                return LogLevel.Information;
-            }
-
-            var ehex = ex as Microsoft.Azure.EventHubs.EventHubsException;
-
-            if (!(ex is OperationCanceledException) && (ehex == null || !ehex.IsTransient))
-            {
-                // any non-transient exceptions or unknown exception types
-                // we want to log as errors
-                return LogLevel.Error;
-            }
-            else
-            {
-                // transient messaging errors we log as info so we have a record
-                // of them, but we don't treat them as actual errors
-                return LogLevel.Information;
-            }
         }
 
         private IAsyncCollector<EventData> BuildFromAttribute(EventHubAttribute attribute)
