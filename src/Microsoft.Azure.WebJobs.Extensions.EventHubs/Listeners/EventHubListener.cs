@@ -15,6 +15,7 @@ using Microsoft.Azure.WebJobs.Host.Listeners;
 using Microsoft.Azure.WebJobs.Host.Scale;
 using Microsoft.Extensions.Logging;
 using Microsoft.WindowsAzure.Storage.Blob;
+using Newtonsoft.Json.Linq;
 
 namespace Microsoft.Azure.WebJobs.EventHubs
 {
@@ -129,12 +130,14 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             {
                 // signal cancellation for any in progress executions 
                 _cts.Cancel();
-
+                
+                _logger.LogInformation(GetOperationDetails(context, $"CloseAsync, {reason.ToString()}"));
                 return Task.CompletedTask;
             }
 
             public Task OpenAsync(PartitionContext context)
             {
+                _logger.LogInformation(GetOperationDetails(context, "OpenAsync"));
                 return Task.CompletedTask;
             }
 
@@ -166,6 +169,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                     PartitionContext = context
                 };
 
+                TriggeredFunctionData input = null;
                 if (_singleDispatch)
                 {
                     // Single dispatch
@@ -178,9 +182,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                             break;
                         }
 
-                        var input = new TriggeredFunctionData
+                        EventHubTriggerInput eventHubTriggerInput = triggerInput.GetSingleEventTriggerInput(i);
+                        input = new TriggeredFunctionData
                         {
-                            TriggerValue = triggerInput.GetSingleEventTriggerInput(i)
+                            TriggerValue = eventHubTriggerInput,
+                            TriggerDetails = eventHubTriggerInput.GetTriggerDetails(context)
                         };
 
                         Task task = TryExecuteWithLoggingAsync(input, triggerInput.Events[i]);
@@ -196,9 +202,10 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 else
                 {
                     // Batch dispatch
-                    var input = new TriggeredFunctionData
+                    input = new TriggeredFunctionData
                     {
-                        TriggerValue = triggerInput
+                        TriggerValue = triggerInput,
+                        TriggerDetails = triggerInput.GetTriggerDetails(context)
                     };
 
                     using (_logger.BeginScope(GetLinksScope(triggerInput.Events)))
@@ -224,7 +231,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 // code, and capture/log/persist failed events, since they won't be retried.
                 if (hasEvents)
                 {
-                    await CheckpointAsync(context);
+                    bool isCheckpointed = await CheckpointAsync(context, triggerInput.Events);
+                    if (isCheckpointed)
+                    {
+                        _logger.LogInformation(GetOperationDetails(context, "CheckpointAsync", input.TriggerDetails));
+                    }
                 }
             }
 
@@ -236,11 +247,13 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 }
             }
 
-            private async Task CheckpointAsync(PartitionContext context)
+            private async Task<bool> CheckpointAsync(PartitionContext context, EventData[] events)
             {
+                bool checkpointed = false;
                 if (_batchCheckpointFrequency == 1)
                 {
                     await _checkpointer.CheckpointAsync(context);
+                    checkpointed = true;
                 }
                 else
                 {
@@ -249,8 +262,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                     {
                         _batchCounter = 0;
                         await _checkpointer.CheckpointAsync(context);
+                        checkpointed = true;
                     }
                 }
+
+                return await Task.FromResult(checkpointed);
             }
 
             protected virtual void Dispose(bool disposing)
@@ -324,6 +340,50 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 }
 
                 return false;
+            }
+
+            private string GetOperationDetails(PartitionContext context, string operation, IDictionary<string, string> triggerDetails = null)
+            {
+                JObject contextJO = new JObject()
+                {
+                    { "partitionId", context.PartitionId },
+                    { "owner", context.Owner },
+                    { "eventHubPath", context.EventHubPath }
+                };
+
+                JObject rootJO = new JObject()
+                {
+                    { "operation", operation },
+                    { "partitionContext", contextJO }
+                };
+
+                if (triggerDetails != null)
+                {
+                    rootJO["triggerDetails"] = JObject.FromObject(triggerDetails);
+                }
+
+                // Log partition lease
+                if (context.Lease != null)
+                {
+                    contextJO["lease"] = new JObject()
+                    {
+                        { "offset", context.Lease.Offset },
+                        { "sequenceNumber", context.Lease.SequenceNumber}
+                    };
+                }
+
+                // Log RuntimeInformation if EnableReceiverRuntimeMetric is enabled
+                if (context.RuntimeInformation != null)
+                {
+                    contextJO["runtimeInformation"] = new JObject()
+                    {
+                        { "lastEnqueuedOffset", context.RuntimeInformation.LastEnqueuedOffset },
+                        { "lastSequenceNumber", context.RuntimeInformation.LastSequenceNumber},
+                        { "lastEnqueuedTimeUtc", context.RuntimeInformation.LastEnqueuedTimeUtc}
+                    };
+                }
+
+                return rootJO.ToString();
             }
         }
     }
