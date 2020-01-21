@@ -4,7 +4,8 @@
 using System;
 using System.Reflection;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Consumer;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Listeners;
@@ -56,7 +57,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
             string resolvedEventHubName = _nameResolver.ResolveWholeString(attribute.EventHubName);
 
-            string consumerGroup = attribute.ConsumerGroup ?? PartitionReceiver.DefaultConsumerGroupName;
+            string consumerGroup = attribute.ConsumerGroup ?? EventHubConsumerClient.DefaultConsumerGroupName;
             string resolvedConsumerGroup = _nameResolver.ResolveWholeString(consumerGroup);
 
             string connectionString = null;

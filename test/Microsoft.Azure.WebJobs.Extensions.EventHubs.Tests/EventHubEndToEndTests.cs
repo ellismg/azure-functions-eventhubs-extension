@@ -60,20 +60,20 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             }
         }
 
-        [Fact]
-        public async Task EventHub_PartitionKey()
-        {
-            using (JobHost host = BuildHost<EventHubPartitionKeyTestJobs>())
-            {
-                var method = typeof(EventHubPartitionKeyTestJobs).GetMethod("SendEvents_TestHub", BindingFlags.Static | BindingFlags.Public);
-                _eventWait = new ManualResetEvent(initialState: false);
-                await host.CallAsync(method, new { input = _testId });
+        //[Fact]
+        //public async Task EventHub_PartitionKey()
+        //{
+        //    using (JobHost host = BuildHost<EventHubPartitionKeyTestJobs>())
+        //    {
+        //        var method = typeof(EventHubPartitionKeyTestJobs).GetMethod("SendEvents_TestHub", BindingFlags.Static | BindingFlags.Public);
+        //        _eventWait = new ManualResetEvent(initialState: false);
+        //        await host.CallAsync(method, new { input = _testId });
 
-                bool result = _eventWait.WaitOne(Timeout);
+        //        bool result = _eventWait.WaitOne(Timeout);
 
-                Assert.True(result);
-            }
-        }
+        //        Assert.True(result);
+        //    }
+        //}
 
         public class EventHubTestSingleDispatchJobs
         {
@@ -117,7 +117,7 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             }
 
             public static void ProcessMultipleEvents([EventHubTrigger(TestHubName)] string[] events,
-                string[] partitionKeyArray, DateTime[] enqueuedTimeArray, IDictionary<string, object>[] propertiesArray,
+                string[] partitionKeyArray, DateTimeOffset[] enqueuedTimeArray, IDictionary<string, object>[] propertiesArray,
                 IReadOnlyDictionary<string, object>[] systemPropertiesArray)
             {
                 Assert.Equal(events.Length, partitionKeyArray.Length);

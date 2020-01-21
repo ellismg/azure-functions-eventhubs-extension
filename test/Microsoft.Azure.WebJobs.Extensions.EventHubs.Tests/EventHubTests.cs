@@ -27,11 +27,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             Assert.Equal(7, contract.Count);
             Assert.Equal(typeof(PartitionContext), contract["PartitionContext"]);
-            Assert.Equal(typeof(string), contract["Offset"]);
+            Assert.Equal(typeof(long), contract["Offset"]);
             Assert.Equal(typeof(long), contract["SequenceNumber"]);
-            Assert.Equal(typeof(DateTime), contract["EnqueuedTimeUtc"]);
+            Assert.Equal(typeof(DateTimeOffset), contract["EnqueuedTime"]);
             Assert.Equal(typeof(IDictionary<string, object>), contract["Properties"]);
-            Assert.Equal(typeof(IDictionary<string, object>), contract["SystemProperties"]);
+            Assert.Equal(typeof(IReadOnlyDictionary<string, object>), contract["SystemProperties"]);
         }
 
         [Fact]
@@ -42,11 +42,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             Assert.Equal(7, contract.Count);
             Assert.Equal(typeof(PartitionContext), contract["PartitionContext"]);
-            Assert.Equal(typeof(string), contract["Offset"]);
+            Assert.Equal(typeof(long), contract["Offset"]);
             Assert.Equal(typeof(long), contract["SequenceNumber"]);
-            Assert.Equal(typeof(DateTime), contract["EnqueuedTimeUtc"]);
+            Assert.Equal(typeof(DateTimeOffset), contract["EnqueuedTime"]);
             Assert.Equal(typeof(IDictionary<string, object>), contract["Properties"]);
-            Assert.Equal(typeof(IDictionary<string, object>), contract["SystemProperties"]);
+            Assert.Equal(typeof(IReadOnlyDictionary<string, object>), contract["SystemProperties"]);
         }
 
         [Fact]
@@ -58,11 +58,11 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             Assert.Equal(7, contract.Count);
             Assert.Equal(typeof(PartitionContext), contract["PartitionContext"]);
             Assert.Equal(typeof(string[]), contract["PartitionKeyArray"]);
-            Assert.Equal(typeof(string[]), contract["OffsetArray"]);
+            Assert.Equal(typeof(long[]), contract["OffsetArray"]);
             Assert.Equal(typeof(long[]), contract["SequenceNumberArray"]);
-            Assert.Equal(typeof(DateTime[]), contract["EnqueuedTimeUtcArray"]);
+            Assert.Equal(typeof(DateTimeOffset[]), contract["EnqueuedTimeArray"]);
             Assert.Equal(typeof(IDictionary<string, object>[]), contract["PropertiesArray"]);
-            Assert.Equal(typeof(IDictionary<string, object>[]), contract["SystemPropertiesArray"]);
+            Assert.Equal(typeof(IReadOnlyDictionary<string, object>[]), contract["SystemPropertiesArray"]);
         }
 
         [Fact]
@@ -81,16 +81,16 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             Assert.Equal(evt.PartitionKey, bindingData["PartitionKey"]);
             Assert.Equal(evt.Offset, bindingData["Offset"]);
             Assert.Equal(evt.SequenceNumber, bindingData["SequenceNumber"]);
-            Assert.Equal(evt.EnqueuedTime, bindingData["EnqueuedTimeUtc"]);
+            Assert.Equal(evt.EnqueuedTime, bindingData["EnqueuedTime"]);
             Assert.Same(evt.Properties, bindingData["Properties"]);
             IDictionary<string, object> bindingDataSysProps = bindingData["SystemProperties"] as Dictionary<string, object>;
             Assert.NotNull(bindingDataSysProps);
-            Assert.Equal(bindingDataSysProps["PartitionKey"], bindingData["PartitionKey"]);
-            Assert.Equal(bindingDataSysProps["Offset"], bindingData["Offset"]);
-            Assert.Equal(bindingDataSysProps["SequenceNumber"], bindingData["SequenceNumber"]);
-            Assert.Equal(bindingDataSysProps["EnqueuedTimeUtc"], bindingData["EnqueuedTimeUtc"]);
+            Assert.Equal(bindingDataSysProps["x-opt-partition-key"], bindingData["PartitionKey"]);
+            Assert.Equal(bindingDataSysProps["x-opt-offset"], bindingData["Offset"]);
+            Assert.Equal(bindingDataSysProps["x-opt-sequence-number"], bindingData["SequenceNumber"]);
+            Assert.Equal(bindingDataSysProps["x-opt-enqueued-time"], bindingData["EnqueuedTime"]);
             Assert.Equal(bindingDataSysProps["iothub-connection-device-id"], "testDeviceId");
-            Assert.Equal(bindingDataSysProps["iothub-enqueuedtime"], DateTime.MinValue);
+            Assert.Equal(bindingDataSysProps["iothub-enqueuedtime"], bindingData["EnqueuedTime"]);
         }
 
         private static EventData GetTestEventData(ReadOnlyMemory<byte> eventBody, string partitionKey = "TestKey")
@@ -252,7 +252,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
             Assert.Equal(5, options.BatchCheckpointFrequency);
         }
 
-        internal static PartitionContext GetPartitionContext(string partitionId = null)
+        internal static PartitionContext GetPartitionContext(string partitionId = "1")
         {
             var constructor = typeof(PartitionContext).GetConstructor(
                 BindingFlags.NonPublic | BindingFlags.Instance,

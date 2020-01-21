@@ -10,11 +10,12 @@ using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
 using Microsoft.ApplicationInsights.Channel;
 using Microsoft.ApplicationInsights.DataContracts;
 using Microsoft.ApplicationInsights.Extensibility;
 using Microsoft.ApplicationInsights.Extensibility.Implementation;
-using Microsoft.Azure.EventHubs;
 using Microsoft.Azure.WebJobs.Host.TestCommon;
 using Microsoft.Azure.WebJobs.Logging;
 using Microsoft.Extensions.Configuration;
@@ -36,7 +37,6 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
         private readonly string _connection;
         private readonly string _endpoint;
         private static int _receivedMessageCount = -1;
-        private readonly EventHubsConnectionStringBuilder _connectionBuilder;
         private readonly JsonSerializerSettings jsonSettingThrowOnError = new JsonSerializerSettings
         {
             MissingMemberHandling = MissingMemberHandling.Error,
@@ -60,8 +60,7 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
             _connection = config.GetConnectionStringOrSetting(connectionName);
             Assert.True(!string.IsNullOrEmpty(_connection), $"Required test connection string '{connectionName}' is missing.");
 
-            _connectionBuilder = new EventHubsConnectionStringBuilder(_connection);
-            _endpoint = _connectionBuilder.Endpoint.ToString();
+            _endpoint = new EventHubProducerClient(_connection).FullyQualifiedNamespace;
         }
 
         [Fact]
@@ -185,7 +184,7 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
         public async Task EventHub_MultipleDispatch_IndependentMessages()
         {
             // send individual messages via EventHub client, process batch by host 
-            var ehClient = EventHubClient.CreateFromConnectionString(_connection);
+            var ehClient = new EventHubProducerClient(_connection);
 
             var messages = new EventData[5];
             var expectedLinks = new TestLink[messages.Length];
@@ -206,7 +205,13 @@ namespace Microsoft.Azure.WebJobs.Host.EndToEndTests
                 };
             }
 
-            await ehClient.SendAsync(messages);
+            var batch = await ehClient.CreateBatchAsync();
+            foreach (EventData m in messages)
+            {
+                Assert.True(batch.TryAdd(m), "could not add data to batch");
+            }
+
+            await ehClient.SendAsync(batch);
 
             using (var host = BuildHost<EventHubTestMultipleDispatchJobs>())
             {

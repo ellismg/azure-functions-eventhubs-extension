@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Linq.Expressions;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,7 @@ using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Consumer;
 using Azure.Messaging.EventHubs.Processor;
 using Azure.Storage.Blobs;
+using Microsoft.AspNetCore.Mvc.ModelBinding.Binders;
 using Microsoft.Azure.WebJobs.EventHubs.Listeners;
 using Microsoft.Azure.WebJobs.Host.Executors;
 using Microsoft.Azure.WebJobs.Host.Scale;
@@ -29,7 +31,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
         [InlineData(8, 12)]
         [InlineData(32, 3)]
         [InlineData(128, 0)]
-        public void ProcessEvents_SingleDispatch_CheckpointsCorrectly(int batchCheckpointFrequency, int expected)
+        public async Task ProcessEvents_SingleDispatch_CheckpointsCorrectly(int batchCheckpointFrequency, int expected)
         {
             var partitionContext = EventHubTests.GetPartitionContext();
             var checkpoints = 0;
@@ -38,7 +40,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
                 BatchCheckpointFrequency = batchCheckpointFrequency
             };
             var checkpointer = new Mock<EventHubListener.ICheckpointer>(MockBehavior.Strict);
-            checkpointer.Setup(p => p.CheckpointAsync(It.IsAny<ProcessEventArgs>())).Callback<PartitionContext>(c =>
+            checkpointer.Setup(p => p.CheckpointAsync(It.IsAny<ProcessEventArgs>())).Callback<ProcessEventArgs>(c =>
             {
                 checkpoints++;
             }).Returns(Task.CompletedTask);
@@ -50,8 +52,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             for (int i = 0; i < 100; i++)
             {
-                List<EventData> events = new List<EventData>() { new EventData(new byte[0]) };
-                // await eventProcessor.ProcessEventsAsync(partitionContext, events);
+                ProcessEventArgs[] events = new ProcessEventArgs[] { new ProcessEventArgs(partitionContext, new EventData(new byte[0]), (ct) => Task.CompletedTask) };
+                await eventProcessor.ProcessEventsAsync(events);
             }
 
             Assert.Equal(expected, checkpoints);
@@ -63,7 +65,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
         [InlineData(8, 12)]
         [InlineData(32, 3)]
         [InlineData(128, 0)]
-        public void ProcessEvents_MultipleDispatch_CheckpointsCorrectly(int batchCheckpointFrequency, int expected)
+        public async Task ProcessEvents_MultipleDispatch_CheckpointsCorrectly(int batchCheckpointFrequency, int expected)
         {
             var partitionContext = EventHubTests.GetPartitionContext();
             var options = new EventHubOptions
@@ -80,8 +82,13 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             for (int i = 0; i < 100; i++)
             {
-                List<EventData> events = new List<EventData>() { new EventData(new byte[0]), new EventData(new byte[0]), new EventData(new byte[0]) };
-                // await eventProcessor.ProcessEventsAsync(partitionContext, events);
+                ProcessEventArgs[] events = new ProcessEventArgs[] {
+                    new ProcessEventArgs(partitionContext, new EventData(new byte[0]), (ct) => Task.CompletedTask),
+                    new ProcessEventArgs(partitionContext, new EventData(new byte[0]), (ct) => Task.CompletedTask),
+                    new ProcessEventArgs(partitionContext, new EventData(new byte[0]), (ct) => Task.CompletedTask)
+                };
+               
+                await eventProcessor.ProcessEventsAsync(events);
             }
 
             checkpointer.Verify(p => p.CheckpointAsync(It.IsAny<ProcessEventArgs>()), Times.Exactly(expected));
@@ -93,18 +100,18 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
         /// </summary>
         /// <returns></returns>
         [Fact]
-        public void ProcessEvents_Failure_Checkpoints()
+        public async Task ProcessEvents_Failure_Checkpoints()
         {
             var partitionContext = EventHubTests.GetPartitionContext();
             var options = new EventHubOptions();
             var checkpointer = new Mock<EventHubListener.ICheckpointer>(MockBehavior.Strict);
             checkpointer.Setup(p => p.CheckpointAsync(It.IsAny<ProcessEventArgs>())).Returns(Task.CompletedTask);
 
-            List<EventData> events = new List<EventData>();
+            List<ProcessEventArgs> events = new List<ProcessEventArgs>();
             List<FunctionResult> results = new List<FunctionResult>();
             for (int i = 0; i < 10; i++)
             {
-                events.Add(new EventData(new byte[0]));
+                events.Add(new ProcessEventArgs(partitionContext, new EventData(new byte[0]), (ct) => Task.CompletedTask));
                 var succeeded = i > 7 ? false : true;
                 results.Add(new FunctionResult(succeeded));
             }
@@ -122,7 +129,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
 
             var eventProcessor = new EventHubListener.EventProcessor(options, executor.Object, loggerMock.Object, true, checkpointer.Object);
 
-            // await eventProcessor.ProcessEventsAsync(partitionContext, events);
+            await eventProcessor.ProcessEventsAsync(events.ToArray());
 
             checkpointer.Verify(p => p.CheckpointAsync(It.IsAny<ProcessEventArgs>()), Times.Once);
         }
@@ -178,7 +185,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs.UnitTests
                                     "Endpoint=sb://test.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=abc123=",
                                     "DefaultEndpointsProtocol=https;AccountName=EventHubScaleMonitorFakeTestAccount;AccountKey=ABCDEFG;EndpointSuffix=core.windows.net",
                                     new Mock<ITriggeredFunctionExecutor>(MockBehavior.Strict).Object,
-                                    null,
+                                    new Mock<EventProcessorClient>(MockBehavior.Loose).Object,
                                     false,
                                     new EventHubOptions(),
                                     testLogger,
