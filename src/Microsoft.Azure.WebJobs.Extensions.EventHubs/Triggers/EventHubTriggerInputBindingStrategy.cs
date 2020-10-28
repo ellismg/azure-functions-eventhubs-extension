@@ -4,8 +4,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Consumer;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Triggers;
 
@@ -49,9 +49,9 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             contract.Add("PartitionContext", typeof(PartitionContext));
 
             AddBindingContractMember(contract, "PartitionKey", typeof(string), isSingleDispatch);
-            AddBindingContractMember(contract, "Offset", typeof(string), isSingleDispatch);
+            AddBindingContractMember(contract, "Offset", typeof(long), isSingleDispatch);
             AddBindingContractMember(contract, "SequenceNumber", typeof(long), isSingleDispatch);
-            AddBindingContractMember(contract, "EnqueuedTimeUtc", typeof(DateTime), isSingleDispatch);
+            AddBindingContractMember(contract, "EnqueuedTime", typeof(DateTime), isSingleDispatch);
             AddBindingContractMember(contract, "Properties", typeof(IDictionary<string, object>), isSingleDispatch);
             AddBindingContractMember(contract, "SystemProperties", typeof(IDictionary<string, object>), isSingleDispatch);
 
@@ -93,9 +93,9 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         {
             int length = events.Length;
             var partitionKeys = new string[length];
-            var offsets = new string[length];
+            var offsets = new long[length];
             var sequenceNumbers = new long[length];
-            var enqueuedTimesUtc = new DateTime[length];
+            var enqueuedTimesUtc = new DateTimeOffset[length];
             var properties = new IDictionary<string, object>[length];
             var systemProperties = new IDictionary<string, object>[length];
 
@@ -108,23 +108,23 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
             for (int i = 0; i < events.Length; i++)
             {
-                partitionKeys[i] = events[i].SystemProperties?.PartitionKey;
-                offsets[i] = events[i].SystemProperties?.Offset;
-                sequenceNumbers[i] = events[i].SystemProperties?.SequenceNumber ?? 0;
-                enqueuedTimesUtc[i] = events[i].SystemProperties?.EnqueuedTimeUtc ?? DateTime.MinValue;
+                partitionKeys[i] = events[i].PartitionKey;
+                offsets[i] = events[i].Offset;
+                sequenceNumbers[i] = events[i].SequenceNumber;
+                enqueuedTimesUtc[i] = events[i].EnqueuedTime;
                 properties[i] = events[i].Properties;
-                systemProperties[i] = events[i].SystemProperties?.ToDictionary();
+                systemProperties[i] = GetSystemPropertiesForBinding(events[i]);
             }
         }
 
         private static void AddBindingData(Dictionary<string, object> bindingData, EventData eventData)
         {
-            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties.PartitionKey), eventData.SystemProperties?.PartitionKey));
-            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties.Offset), eventData.SystemProperties?.Offset));
-            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties.SequenceNumber), eventData.SystemProperties?.SequenceNumber ?? 0));
-            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties.EnqueuedTimeUtc), eventData.SystemProperties?.EnqueuedTimeUtc ?? DateTime.MinValue));
+            SafeAddValue(() => bindingData.Add(nameof(eventData.PartitionKey), eventData.PartitionKey));
+            SafeAddValue(() => bindingData.Add(nameof(eventData.Offset), eventData.Offset));
+            SafeAddValue(() => bindingData.Add(nameof(eventData.SequenceNumber), eventData.SequenceNumber));
+            SafeAddValue(() => bindingData.Add(nameof(eventData.EnqueuedTime), eventData.EnqueuedTime));
             SafeAddValue(() => bindingData.Add(nameof(eventData.Properties), eventData.Properties));
-            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties), eventData.SystemProperties?.ToDictionary()));
+            SafeAddValue(() => bindingData.Add(nameof(eventData.SystemProperties), GetSystemPropertiesForBinding(eventData)));
         }
 
         private static void SafeAddValue(Action addValue)
@@ -137,7 +137,23 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             {
                 // some message propery getters can throw, based on the
                 // state of the message
+            }        
+        }
+
+        private static IDictionary<string, object> GetSystemPropertiesForBinding(EventData eventData)
+        {
+            IDictionary<string, object> modifiedDictionary = new Dictionary<string, object>();
+            foreach (KeyValuePair<string, object> kvp in eventData.SystemProperties)
+            {
+                modifiedDictionary[kvp.Key] = kvp.Value;
             }
+
+            // Following is needed to maintain structure of bindingdata: https://github.com/Azure/azure-webjobs-sdk/pull/1849
+            modifiedDictionary["SequenceNumber"] = eventData.SequenceNumber;
+            modifiedDictionary["Offset"] = eventData.Offset;
+            modifiedDictionary["PartitionKey"] = eventData.PartitionKey;
+            modifiedDictionary["EnqueuedTime"] = eventData.EnqueuedTime;
+            return modifiedDictionary;
         }
     }
 }

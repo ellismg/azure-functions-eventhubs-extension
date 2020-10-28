@@ -1,12 +1,13 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
 
 namespace Microsoft.Azure.WebJobs.EventHubs
 {
@@ -17,20 +18,17 @@ namespace Microsoft.Azure.WebJobs.EventHubs
     /// </summary>
     internal class EventHubAsyncCollector : IAsyncCollector<EventData>
     {
-        private readonly EventHubClient _client;
+        private readonly EventHubProducerClient _client;
 
         private readonly Dictionary<string, PartitionCollector> _partitions = new Dictionary<string, PartitionCollector>();
               
         private const int BatchSize = 100;
-
-        // Suggested to use 240k instead of 256k to leave padding room for headers.
-        private const int MaxByteSize = 240 * 1024; 
         
         /// <summary>
         /// Create a sender around the given client. 
         /// </summary>
         /// <param name="client"></param>
-        public EventHubAsyncCollector(EventHubClient client)
+        public EventHubAsyncCollector(EventHubProducerClient client)
         {
             if (client == null)
             {
@@ -52,14 +50,16 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 throw new ArgumentNullException("item");
             }
 
-            string key = item.SystemProperties?.PartitionKey ?? string.Empty;
+            // TODO(matell): In the common case item.PartitionKey will be null since partiton keys are not assigned until
+            // after a message is delivered.
+            string key = item.PartitionKey ?? string.Empty;
 
             PartitionCollector partition;
             lock (_partitions)
             {
                 if (!_partitions.TryGetValue(key, out partition))
                 {
-                    partition = new PartitionCollector(this);
+                    partition = new PartitionCollector(this._client);
                     _partitions[key] = partition;
                 }
             }
@@ -90,28 +90,16 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             }
         }
 
-        /// <summary>
-        /// Send the batch of events. All items in the batch will have the same partition key. 
-        /// </summary>
-        /// <param name="batch">the set of events to send</param>
-        protected virtual async Task SendBatchAsync(IEnumerable<EventData> batch)
-        {
-            await _client.SendAsync(batch);
-        }
-
         // A per-partition sender 
         private class PartitionCollector : IAsyncCollector<EventData>
         {
-            private readonly EventHubAsyncCollector _parent;
+            private readonly EventHubProducerClient _client;
+            private EventDataBatch _batch;
+            private object _lock = new object();
 
-            private List<EventData> _list = new List<EventData>();
-
-            // total size of bytes in _list that we'll be sending in this batch. 
-            private int _currentByteSize = 0;
-
-            public PartitionCollector(EventHubAsyncCollector parent)
+            public PartitionCollector(EventHubProducerClient client)
             {
-                this._parent = parent;
+                this._client = client;
             }
 
             /// <summary>
@@ -129,29 +117,56 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
                 while (true)
                 {
-                    lock (_list)
+                    if (_batch == null)
                     {
-                        var size = (int)item.Body.Count;
+                        var batch = await _client.CreateBatchAsync(cancellationToken).ConfigureAwait(false);
+                        if (Interlocked.CompareExchange(ref _batch, batch, null) != null)
+                        {
+                            // If we got here, some other thread created the batch before us, so we dispose the one we just made.
+                            batch.Dispose();
+                        }
+                    }
 
-                        if (size > MaxByteSize)
+                    EventDataBatch batchToPublish = null;
+
+                    lock (_lock)
+                    {
+                        if (_batch == null)
+                        {
+                            // The batch was published and disposed out from under us. Retry the outer loop to create a new batch and try again
+                            continue;
+                        }
+
+                        if (_batch.TryAdd(item))
+                        {
+                            return;
+                        }
+
+                        // If we reach this point, the new item won't fit in the batch. If there are no other items in the batch it means this event will never fit
+                        // and we should error. If there are already some items in the batch, we should publish the batched items and then
+                        // try publishing this one again to see if it will fit.
+                        if (_batch.Count == 0)
                         {
                             // Single event is too large to add.
-                            string msg = string.Format("Event is too large. Event is approximately {0}b and max size is {1}b", size, MaxByteSize);
+                            string msg = string.Format("Event is too large. Event is approximately {0}b and max size is {1}b", item.Body.Length, _batch.MaximumSizeInBytes);
                             throw new InvalidOperationException(msg);
                         }
 
-                        bool flush = (_currentByteSize + size > MaxByteSize) || (_list.Count >= BatchSize);
-                        if (!flush)
-                        {
-                            _list.Add(item);
-                            _currentByteSize += size;
-                            return;
-                        }
-                        // We should flush. 
-                        // Release the lock, flush, and then loop around and try again. 
+                        batchToPublish = _batch;
+                        _batch = null;
                     }
 
-                    await this.FlushAsync(cancellationToken);
+                    if (batchToPublish != null)
+                    {
+                        try
+                        {
+                            await _client.SendAsync(_batch, cancellationToken).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            batchToPublish.Dispose();
+                        }                        
+                    }
                 }
             }
 
@@ -161,22 +176,23 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             /// <param name="cancellationToken">a cancellation token</param>
             public async Task FlushAsync(CancellationToken cancellationToken = default(CancellationToken))
             {
-                EventData[] batch = null;
-                lock (_list)
+                EventDataBatch batchToPublish = null;
+
+                lock (_lock)
                 {
-                    batch = _list.ToArray();
-                    _list.Clear();
-                    _currentByteSize = 0;
+                    batchToPublish = _batch;
+                    _batch = null;
                 }
 
-                if (batch.Length > 0)
+                if (batchToPublish != null)
                 {
-                    await _parent.SendBatchAsync(batch);
-
-                    // Dispose all messages to help with memory pressure. If this is missed, the finalizer thread will still get them. 
-                    foreach (var msg in batch)
+                    try
                     {
-                        msg.Dispose();
+                        await _client.SendAsync(batchToPublish).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        batchToPublish.Dispose();
                     }
                 }
             }

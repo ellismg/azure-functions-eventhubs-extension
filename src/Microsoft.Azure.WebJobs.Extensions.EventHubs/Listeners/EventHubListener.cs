@@ -8,16 +8,17 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Consumer;
+using Azure.Messaging.EventHubs.Processor;
+using Azure.Storage.Blobs;
 using Microsoft.Azure.WebJobs.EventHubs.Listeners;
+using Microsoft.Azure.WebJobs.EventHubs.Processor;
 using Microsoft.Azure.WebJobs.Host.Executors;
 using Microsoft.Azure.WebJobs.Host.Listeners;
 using Microsoft.Azure.WebJobs.Host.Scale;
 using Microsoft.Extensions.Logging;
-using Microsoft.WindowsAzure.Storage.Blob;
 using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
 
 namespace Microsoft.Azure.WebJobs.EventHubs
 {
@@ -49,7 +50,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             bool singleDispatch,
             EventHubOptions options,
             ILogger logger,
-            CloudBlobContainer blobContainer = null)
+            BlobContainerClient blobContainer = null)
         {
             _functionId = functionId;
             _eventHubName = eventHubName;
@@ -75,7 +76,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         public async Task StartAsync(CancellationToken cancellationToken)
         {
-            await _eventProcessorHost.RegisterEventProcessorFactoryAsync(this, _options.EventProcessorOptions);
+            await _eventProcessorHost.RegisterEventProcessorFactoryAsync(this, _options.MaxBatchSize, _options.InvokeProcessorAfterReceiveTimeout, _options.EventProcessorOptions);
             _started = true;
         }
 
@@ -88,7 +89,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             _started = false;
         }
 
-        IEventProcessor IEventProcessorFactory.CreateEventProcessor(PartitionContext context)
+        IEventProcessor IEventProcessorFactory.CreateEventProcessor()
         {
             return new EventProcessor(_options, _executor, _logger, _singleDispatch);
         }
@@ -103,7 +104,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// </summary>
         internal interface ICheckpointer
         {
-            Task CheckpointAsync(PartitionContext context);
+            Task CheckpointAsync(ProcessorPartitionContext context);
         }
 
         // We get a new instance each time Start() is called. 
@@ -128,7 +129,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 _logger = logger;
             }
 
-            public Task CloseAsync(PartitionContext context, CloseReason reason)
+            public Task CloseAsync(ProcessorPartitionContext context, ProcessingStoppedReason reason)
             {
                 // signal cancellation for any in progress executions 
                 _cts.Cancel();
@@ -137,23 +138,22 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 return Task.CompletedTask;
             }
 
-            public Task OpenAsync(PartitionContext context)
+            public Task OpenAsync(ProcessorPartitionContext context)
             {
                 _logger.LogDebug(GetOperationDetails(context, "OpenAsync"));
                 return Task.CompletedTask;
             }
 
-            public Task ProcessErrorAsync(PartitionContext context, Exception error)
+            public Task ProcessErrorAsync(ProcessorPartitionContext context, Exception error)
             {
                 string errorDetails = $"Partition Id: '{context.PartitionId}', Owner: '{context.Owner}', EventHubPath: '{context.EventHubPath}'";
 
-                if (error is ReceiverDisconnectedException ||
-                    error is LeaseLostException)
+                if (error is EventHubsException && ((EventHubsException) error).IsTransient)
                 {
                     // For EventProcessorHost these exceptions can happen as part
                     // of normal partition balancing across instances, so we want to
                     // trace them, but not treat them as errors.
-                    _logger.LogInformation($"An Event Hub exception of type '{error.GetType().Name}' was thrown from {errorDetails}. This exception type is typically a result of Event Hub processor rebalancing and can be safely ignored.");
+                    _logger.LogInformation($"An Event Hub exception of type '{error.GetType().Name}' was thrown from {errorDetails}. This exception type is transient and usually can be safely ignored.");
                 }
                 else
                 {
@@ -163,7 +163,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 return Task.CompletedTask;
             }
 
-            public async Task ProcessEventsAsync(PartitionContext context, IEnumerable<EventData> messages)
+            public async Task ProcessEventsAsync(ProcessorPartitionContext context, IEnumerable<EventData> messages)
             {
                 var triggerInput = new EventHubTriggerInput
                 {
@@ -216,14 +216,6 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                     }
                 }
 
-                // Dispose all messages to help with memory pressure. If this is missed, the finalizer thread will still get them.
-                bool hasEvents = false;
-                foreach (var message in messages)
-                {
-                    hasEvents = true;
-                    message.Dispose();
-                }
-
                 // Checkpoint if we processed any events.
                 // Don't checkpoint if no events. This can reset the sequence counter to 0.
                 // Note: we intentionally checkpoint the batch regardless of function 
@@ -231,7 +223,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 // so that is the responsibility of the user's function currently. E.g.
                 // the function should have try/catch handling around all event processing
                 // code, and capture/log/persist failed events, since they won't be retried.
-                if (hasEvents)
+                if (messages.Any())
                 {
                     await CheckpointAsync(context);
                 }
@@ -245,7 +237,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 }
             }
 
-            private async Task CheckpointAsync(PartitionContext context)
+            private async Task CheckpointAsync(ProcessorPartitionContext context)
             {
                 bool checkpointed = false;
                 if (_batchCheckpointFrequency == 1)
@@ -287,7 +279,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 Dispose(true);
             }
 
-            async Task ICheckpointer.CheckpointAsync(PartitionContext context)
+            async Task ICheckpointer.CheckpointAsync(ProcessorPartitionContext context)
             {
                 await context.CheckpointAsync();
             }
@@ -342,7 +334,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 return false;
             }
 
-            private string GetOperationDetails(PartitionContext context, string operation)
+            private string GetOperationDetails(ProcessorPartitionContext context, string operation)
             {
                 StringWriter sw = new StringWriter();
                 using (JsonTextWriter writer = new JsonTextWriter(sw) { Formatting = Formatting.None })
@@ -361,19 +353,19 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                     {
                         writer.WritePropertyName("lease");
                         writer.WriteStartObject();
-                        WritePropertyIfNotNull(writer, "offset", context.Lease.Offset);
+                        WritePropertyIfNotNull(writer, "offset", context.Lease.Offset.ToString());
                         WritePropertyIfNotNull(writer, "sequenceNumber", context.Lease.SequenceNumber.ToString());
                         writer.WriteEndObject();
                     }
 
                     // Log RuntimeInformation if EnableReceiverRuntimeMetric is enabled
-                    if (context.RuntimeInformation != null)
+                    if (context.LastEnqueuedEventProperties != null)
                     {
-                        writer.WritePropertyName("runtimeInformation");
+                        writer.WritePropertyName("lastEnquedEventProperties");
                         writer.WriteStartObject();
-                        WritePropertyIfNotNull(writer, "lastEnqueuedOffset", context.RuntimeInformation.LastEnqueuedOffset);
-                        WritePropertyIfNotNull(writer, "lastSequenceNumber", context.RuntimeInformation.LastSequenceNumber.ToString());
-                        WritePropertyIfNotNull(writer, "lastEnqueuedTimeUtc", context.RuntimeInformation.LastEnqueuedTimeUtc.ToString("o"));
+                        WritePropertyIfNotNull(writer, "offset", context.LastEnqueuedEventProperties.Value.Offset?.ToString());
+                        WritePropertyIfNotNull(writer, "sequenceNumber", context.LastEnqueuedEventProperties.Value.SequenceNumber?.ToString());
+                        WritePropertyIfNotNull(writer, "enqueuedTimeUtc", context.LastEnqueuedEventProperties.Value.EnqueuedTime?.ToString("o"));
                         writer.WriteEndObject();
                     }
                     writer.WriteEndObject();

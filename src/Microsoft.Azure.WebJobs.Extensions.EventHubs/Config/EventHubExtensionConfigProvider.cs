@@ -4,9 +4,10 @@
 using System;
 using System.Text;
 using System.Threading.Tasks;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
 using Microsoft.Azure.WebJobs.Description;
+using Microsoft.Azure.WebJobs.EventHubs.Processor;
 using Microsoft.Azure.WebJobs.Host.Bindings;
 using Microsoft.Azure.WebJobs.Host.Config;
 using Microsoft.Azure.WebJobs.Host.Configuration;
@@ -53,7 +54,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 throw new ArgumentNullException(nameof(context));
             }
 
-            _options.Value.EventProcessorOptions.SetExceptionHandler(ExceptionReceivedHandler);
+            _options.Value.SetExceptionHandler(ExceptionReceivedHandler);
             _configuration.ConfigurationSection.Bind(_options);
 
             context
@@ -75,7 +76,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             context.AddBindingRule<EventHubAttribute>()
                 .BindToInput(attribute =>
             {
-                return _options.Value.GetEventHubClient(attribute.EventHubName, attribute.Connection);
+                return _options.Value.GetEventHubProducerClient(attribute.EventHubName, attribute.Connection);
             });
 
             ExceptionHandler = (e =>
@@ -102,15 +103,6 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         private static LogLevel GetLogLevel(Exception ex)
         {
-            if (ex is ReceiverDisconnectedException ||
-                ex is LeaseLostException)
-            {
-                // For EventProcessorHost these exceptions can happen as part
-                // of normal partition balancing across instances, so we want to
-                // trace them, but not treat them as errors.
-                return LogLevel.Information;
-            }
-
             var ehex = ex as EventHubsException;
             if (!(ex is OperationCanceledException) && (ehex == null || !ehex.IsTransient))
             {
@@ -128,7 +120,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         private IAsyncCollector<EventData> BuildFromAttribute(EventHubAttribute attribute)
         {
-            EventHubClient client = _options.Value.GetEventHubClient(attribute.EventHubName, attribute.Connection);
+            EventHubProducerClient client = _options.Value.GetEventHubProducerClient(attribute.EventHubName, attribute.Connection);
             return new EventHubAsyncCollector(client);
         }
 
@@ -139,7 +131,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             => new EventData(input);
 
         private static byte[] ConvertEventData2Bytes(EventData input)
-            => input.Body.Array;
+            => input.Body.ToArray();
 
         private static EventData ConvertString2EventData(string input)
             => ConvertBytes2EventData(Encoding.UTF8.GetBytes(input));

@@ -1,8 +1,8 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the MIT License. See License.txt in the project root for license information.
 
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Consumer;
 using System.Collections.Generic;
 
 namespace Microsoft.Azure.WebJobs.EventHubs
@@ -64,18 +64,18 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             string offset, enqueueTimeUtc, sequenceNumber;
             if (IsSingleDispatch)
             {
-                offset = Events[0].SystemProperties?.Offset;
-                enqueueTimeUtc = Events[0].SystemProperties?.EnqueuedTimeUtc.ToString("o");
-                sequenceNumber = Events[0].SystemProperties?.SequenceNumber.ToString();
+                offset = Events[0].Offset.ToString();
+                enqueueTimeUtc = Events[0].EnqueuedTime.ToString("o");
+                sequenceNumber = Events[0].SequenceNumber.ToString();
             }
             else
             {
                 EventData first = Events[0];
                 EventData last = Events[Events.Length - 1];
 
-                offset = $"{first.SystemProperties?.Offset}-{last.SystemProperties?.Offset}";
-                enqueueTimeUtc = $"{first.SystemProperties?.EnqueuedTimeUtc.ToString("o")}-{last.SystemProperties?.EnqueuedTimeUtc.ToString("o")}";
-                sequenceNumber = $"{first.SystemProperties?.SequenceNumber}-{last.SystemProperties?.SequenceNumber}";
+                offset = $"{first.Offset}-{last.Offset}";
+                enqueueTimeUtc = $"{first.EnqueuedTime.ToString("o")}-{last.EnqueuedTime.ToString("o")}";
+                sequenceNumber = $"{first.SequenceNumber}-{last.SequenceNumber}";
             }
 
             return new Dictionary<string, string>()

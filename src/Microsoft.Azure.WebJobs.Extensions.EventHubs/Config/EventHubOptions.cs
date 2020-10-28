@@ -6,8 +6,10 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
-using Microsoft.Azure.EventHubs;
-using Microsoft.Azure.EventHubs.Processor;
+using Azure.Messaging.EventHubs.Consumer;
+using Azure.Messaging.EventHubs.Primitives;
+using Azure.Messaging.EventHubs.Producer;
+using Microsoft.Azure.WebJobs.EventHubs.Processor;
 using Microsoft.Azure.WebJobs.Hosting;
 using Microsoft.Extensions.Configuration;
 using Newtonsoft.Json;
@@ -23,9 +25,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         // Connection strings may also encapsulate different endpoints. 
 
         // The client cache must be thread safe because clients are accessed/added on the function
-        private readonly ConcurrentDictionary<string, EventHubClient> _clients = new ConcurrentDictionary<string, EventHubClient>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, EventHubProducerClient> _clients = new ConcurrentDictionary<string, EventHubProducerClient>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ReceiverCreds> _receiverCreds = new Dictionary<string, ReceiverCreds>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, EventProcessorHost> _explicitlyProvidedHosts = new Dictionary<string, EventProcessorHost>(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// Name of the blob container that the EventHostProcessor instances uses to coordinate load balancing listening on an event hub. 
@@ -36,8 +37,14 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
         public EventHubOptions()
         {
-            EventProcessorOptions = EventProcessorOptions.DefaultOptions;
-            PartitionManagerOptions = new PartitionManagerOptions();
+            MaxBatchSize = 10;
+            InvokeProcessorAfterReceiveTimeout = false;
+            EventProcessorOptions = new EventProcessorOptions()
+            {
+                MaximumWaitTime = TimeSpan.FromMinutes(1),
+                PrefetchCount = 300,
+                DefaultStartingPosition = EventPosition.Earliest,                
+            };
         }
 
         /// <summary>
@@ -60,22 +67,56 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             }
         }
 
+        public int _maxBatchSize;
+
+        /// <summary>
+        /// Gets or sets the maximum number of events delivered in a batch. Default 10.
+        /// </summary>
+        public int MaxBatchSize
+        {
+            get
+            {
+                return _maxBatchSize;
+            }
+
+            set
+            {
+                if (value < 1)
+                {
+                    throw new ArgumentException("Batch checkpoint frequency must be larger than 0.");
+                }
+                _maxBatchSize = value;
+            }
+        }
+
+        public bool InvokeProcessorAfterReceiveTimeout { get; set; }
+
         public EventProcessorOptions EventProcessorOptions { get; }
 
-        public PartitionManagerOptions PartitionManagerOptions { get; }
+        private Action<ExceptionReceivedEventArgs> _exceptionHandler;
+
+        internal void SetExceptionHandler(Action<ExceptionReceivedEventArgs> exceptionHandler)
+        {
+            if (exceptionHandler == null)
+            {
+                throw new ArgumentNullException(nameof(exceptionHandler));
+            }
+
+            _exceptionHandler = exceptionHandler;
+        }
 
         /// <summary>
         /// Add an existing client for sending messages to an event hub.  Infer the eventHub name from client.path
         /// </summary>
         /// <param name="client"></param>
-        public void AddEventHubClient(EventHubClient client)
+        public void AddEventHubProducerClient(EventHubProducerClient client)
         {
             if (client == null)
             {
                 throw new ArgumentNullException("client");
             }
             string eventHubName = client.EventHubName;
-            AddEventHubClient(eventHubName, client);
+            AddEventHubProducerClient(eventHubName, client);
         }
 
         /// <summary>
@@ -83,7 +124,7 @@ namespace Microsoft.Azure.WebJobs.EventHubs
         /// </summary>
         /// <param name="eventHubName">name of the event hub</param>
         /// <param name="client"></param>
-        public void AddEventHubClient(string eventHubName, EventHubClient client)
+        public void AddEventHubProducerClient(string eventHubName, EventHubProducerClient client)
         {
             if (eventHubName == null)
             {
@@ -119,32 +160,8 @@ namespace Microsoft.Azure.WebJobs.EventHubs
                 sb.EntityPath = eventHubName;
             }
 
-            var client = EventHubClient.CreateFromConnectionString(sb.ToString());
-            AddEventHubClient(eventHubName, client);
-        }
-
-        /// <summary>
-        /// Add a connection for listening on events from an event hub. 
-        /// </summary>
-        /// <param name="eventHubName">Name of the event hub</param>
-        /// <param name="listener">initialized listener object</param>
-        /// <remarks>The EventProcessorHost type is from the ServiceBus SDK. 
-        /// Allow callers to bind to EventHubConfiguration without needing to have a direct assembly reference to the ServiceBus SDK. 
-        /// The compiler needs to resolve all types in all overloads, so give methods that use the ServiceBus SDK types unique non-overloaded names
-        /// to avoid eager compiler resolution. 
-        /// </remarks>
-        public void AddEventProcessorHost(string eventHubName, EventProcessorHost listener)
-        {
-            if (eventHubName == null)
-            {
-                throw new ArgumentNullException("eventHubName");
-            }
-            if (listener == null)
-            {
-                throw new ArgumentNullException("listener");
-            }
-
-            _explicitlyProvidedHosts[eventHubName] = listener;
+            var client = new EventHubProducerClient(sb.ToString());
+            AddEventHubProducerClient(eventHubName, client);
         }
 
         /// <summary>
@@ -197,9 +214,9 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             };
         }
 
-        internal EventHubClient GetEventHubClient(string eventHubName, string connection)
+        internal EventHubProducerClient GetEventHubProducerClient(string eventHubName, string connection)
         {
-            EventHubClient client;
+            EventHubProducerClient client;
 
             if (string.IsNullOrEmpty(eventHubName))
             {
@@ -228,12 +245,9 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             ReceiverCreds creds;
             if (this._receiverCreds.TryGetValue(eventHubName, out creds))
             {
-                // Common case. Create a new EventProcessorHost instance to listen. 
-                string eventProcessorHostName = Guid.NewGuid().ToString();
-
                 if (consumerGroup == null)
                 {
-                    consumerGroup = PartitionReceiver.DefaultConsumerGroupName;
+                    consumerGroup = EventHubConsumerClient.DefaultConsumerGroupName;
                 }
                 var storageConnectionString = creds.StorageConnectionString;
                 if (storageConnectionString == null)
@@ -257,27 +271,17 @@ namespace Microsoft.Azure.WebJobs.EventHubs
 
                 // Use blob prefix support available in EPH starting in 2.2.6 
                 EventProcessorHost host = new EventProcessorHost(
-                    hostName: eventProcessorHostName,
                     eventHubPath: actualPath,
                     consumerGroupName: consumerGroup,
                     eventHubConnectionString: sb.ToString(),
                     storageConnectionString: storageConnectionString,
                     leaseContainerName: LeaseContainerName,
-                    storageBlobPrefix: blobPrefix);
-
-                host.PartitionManagerOptions = PartitionManagerOptions;
+                    legacyCheckpointStorageBlobPrefix: blobPrefix,
+                    exceptionHandler: _exceptionHandler);
 
                 return host;
             }
-            else
-            {
-                // Rare case: a power-user caller specifically provided an event processor host to use. 
-                EventProcessorHost host;
-                if (_explicitlyProvidedHosts.TryGetValue(eventHubName, out host))
-                {
-                    return host;
-                }
-            }
+
             throw new InvalidOperationException("No event hub receiver named " + eventHubName);
         }
 
@@ -372,29 +376,18 @@ namespace Microsoft.Azure.WebJobs.EventHubs
             {
                 eventProcessorOptions = new JObject
                 {
-                    { nameof(EventProcessorOptions.EnableReceiverRuntimeMetric), EventProcessorOptions.EnableReceiverRuntimeMetric },
-                    { nameof(EventProcessorOptions.InvokeProcessorAfterReceiveTimeout), EventProcessorOptions.InvokeProcessorAfterReceiveTimeout },
-                    { nameof(EventProcessorOptions.MaxBatchSize), EventProcessorOptions.MaxBatchSize },
+                    { nameof(EventProcessorOptions.TrackLastEnqueuedEventProperties), EventProcessorOptions.TrackLastEnqueuedEventProperties },
                     { nameof(EventProcessorOptions.PrefetchCount), EventProcessorOptions.PrefetchCount },
-                    { nameof(EventProcessorOptions.ReceiveTimeout), EventProcessorOptions.ReceiveTimeout }
-                };
-            }
-
-            JObject partitionManagerOptions = null;
-            if (PartitionManagerOptions != null)
-            {
-                partitionManagerOptions = new JObject
-                {
-                    { nameof(PartitionManagerOptions.LeaseDuration), PartitionManagerOptions.LeaseDuration },
-                    { nameof(PartitionManagerOptions.RenewInterval), PartitionManagerOptions.RenewInterval },
+                    { nameof(EventProcessorOptions.MaximumWaitTime), EventProcessorOptions.MaximumWaitTime }
                 };
             }
 
             JObject options = new JObject
             {
+                { nameof(MaxBatchSize), MaxBatchSize },
+                { nameof(InvokeProcessorAfterReceiveTimeout), InvokeProcessorAfterReceiveTimeout },
                 { nameof(BatchCheckpointFrequency), BatchCheckpointFrequency },
                 { nameof(EventProcessorOptions), eventProcessorOptions },
-                { nameof(PartitionManagerOptions), partitionManagerOptions }
             };
 
             return options.ToString(Formatting.Indented);
